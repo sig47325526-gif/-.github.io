@@ -281,6 +281,26 @@ button{font-family:inherit;}
 .list-row-date{font-size:11px; color:var(--ink-soft); margin-top:4px;}
 .date-group-label{font-size:12px; font-weight:700; color:var(--ink-soft); margin:16px 0 4px; padding:0 4px;}
 .date-group-label:first-child{margin-top:0;}
+.tree-row{
+  display:flex; align-items:center; gap:10px; padding:14px 2px; border-bottom:1px solid var(--border);
+  cursor:pointer; font-size:13.5px; font-weight:700; color:var(--ink);
+}
+.tree-row:last-child{border-bottom:none;}
+.tree-row-label{flex:1;}
+.tree-row-arrow{color:var(--ink-soft); font-size:16px;}
+.chapter-count{
+  font-size:11px; font-weight:600; color:var(--ink-soft); background:var(--card2);
+  padding:2px 9px; border-radius:999px; flex-shrink:0;
+}
+.done-badge{
+  display:inline-block; font-size:10px; font-weight:700; color:var(--green);
+  background:var(--green-soft); padding:1px 7px; border-radius:999px; margin-left:6px; vertical-align:middle;
+}
+.btn-back{
+  background:none; border:none; color:var(--accent-ink); font-weight:700; font-size:14px;
+  padding:6px 0 12px; cursor:pointer;
+}
+mark{background:var(--accent-soft); color:var(--accent-ink); padding:0 2px; border-radius:3px;}
 .sec-title{font-size:15px; font-weight:700; margin:18px 0 4px; display:flex; align-items:center; gap:6px;}
 .sec-title:first-child{margin-top:0;}
 .hint{font-size:12.5px; color:var(--ink-soft); line-height:1.5; margin-bottom:10px;}
@@ -447,6 +467,9 @@ var DATA_BY_ID = {};
 var DATA_BY_BOOK = {};
 var state = null;
 var currentTab = "home";
+var libraryView = "books";
+var libraryCurrentBook = null;
+var librarySearchQuery = "";
 var collectionSubTab = "favorites";
 var justDrewAnimation = false;
 var selectedMood = null;
@@ -500,7 +523,7 @@ function defaultState(){
   var books = {};
   BOOK_ORDER.forEach(function(b){ books[b] = true; });
   return {
-    usedIds: [],
+    completions: {},
     history: {},
     favorites: {},
     todaysPick: null,
@@ -511,7 +534,14 @@ function defaultState(){
 function normalizeState(parsed){
   var d = defaultState();
   if(!parsed || typeof parsed !== "object") return d;
-  parsed.usedIds = parsed.usedIds || [];
+  parsed.completions = parsed.completions || {};
+  if(Array.isArray(parsed.usedIds)){
+    // 예전 버전(완료 여부만 기록) 데이터 이전
+    parsed.usedIds.forEach(function(id){
+      if(!parsed.completions[id]) parsed.completions[id] = 1;
+    });
+    delete parsed.usedIds;
+  }
   parsed.history = parsed.history || {};
   parsed.favorites = parsed.favorites || {};
   parsed.settings = parsed.settings || {};
@@ -530,6 +560,20 @@ function loadState(){
     storageOK = false;
     return defaultState();
   }
+}
+
+function completedCount(id){ return state.completions[id] || 0; }
+function isCompleted(id){ return completedCount(id) > 0; }
+function markCompleted(ids){
+  ids.forEach(function(id){
+    state.completions[id] = (state.completions[id] || 0) + 1;
+  });
+}
+function totalCompletedDistinct(){ return Object.keys(state.completions).length; }
+function totalCompletionEvents(){
+  var sum = 0;
+  Object.keys(state.completions).forEach(function(id){ sum += state.completions[id]; });
+  return sum;
 }
 
 function favKey(ids){ return (ids && ids.length) ? ids[0] : null; }
@@ -642,13 +686,10 @@ function pickPassage(diffKey, moodKey){
   var enabledBooks = BOOK_ORDER.filter(function(b){ return state.settings.books[b]; });
   if(enabledBooks.length === 0) return {chosen:null, moodMatched:false};
 
-  var usedSet = {};
-  state.usedIds.forEach(function(id){ usedSet[id] = true; });
-
   var candidates = [];
   enabledBooks.forEach(function(b){
     (DATA_BY_BOOK[b]||[]).forEach(function(u, idx){
-      if(!usedSet[u.id]) candidates.push({u:u, idx:idx, book:b});
+      if(!isCompleted(u.id)) candidates.push({u:u, idx:idx, book:b});
     });
   });
   if(candidates.length === 0) return {chosen:null, moodMatched:false};
@@ -672,7 +713,7 @@ function pickPassage(diffKey, moodKey){
   var i = start.idx + 1;
   while(total < diff.min && i < bookArr.length){
     var nxt = bookArr[i];
-    if(usedSet[nxt.id]) break;
+    if(isCompleted(nxt.id)) break;
     if(total + nxt.len > diff.max + 150) break;
     chosen.push(nxt);
     total += nxt.len;
@@ -704,7 +745,7 @@ function computeStreak(){
   return {current:cur, longest:longest};
 }
 
-function totalCompleted(){ return state.usedIds.length; }
+function totalCompleted(){ return totalCompletedDistinct(); }
 function totalUnits(){ return DATA.length; }
 
 var appEl = document.getElementById("app");
@@ -841,6 +882,7 @@ function renderHome(){
     html += '<div class="sec-title" style="margin-top:18px;">2️⃣ 오늘의 기분·상황 <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">(선택)</span></div>';
     html += moodPickerHtml();
     html += '<button class="btn btn-primary" id="drawBtn" style="margin-top:14px;">🪷 오늘의 법문 뽑기</button>';
+    html += '<button class="auth-guest" id="pickManualBtn" style="margin-top:12px;">또는 서고에서 직접 골라 사경하기 →</button>';
     html += '</div>';
   } else if(!completedToday){
     var ids = todaysPick.ids;
@@ -867,12 +909,10 @@ function renderHome(){
 
 function remainingCountsByDiff(moodKey){
   var enabledBooks = BOOK_ORDER.filter(function(b){ return state.settings.books[b]; });
-  var usedSet = {};
-  state.usedIds.forEach(function(id){ usedSet[id] = true; });
   var candidates = [];
   enabledBooks.forEach(function(b){
     (DATA_BY_BOOK[b]||[]).forEach(function(u){
-      if(!usedSet[u.id]) candidates.push(u);
+      if(!isCompleted(u.id)) candidates.push(u);
     });
   });
   var pool = candidates;
@@ -936,12 +976,16 @@ function passageCardHtml(ids, readonly, small, animate, moodKey){
   if(moodKey && MOODS[moodKey]){
     h += '<div class="mood-badge">'+MOODS[moodKey].emoji+' '+esc(MOODS[moodKey].label)+'에 어울리는 법문</div>';
   }
+  var priorCount = completedCount(ids[0]) - (readonly?1:0); // 완료 처리 전 기존 횟수(다시 사경인 경우)
+  if(priorCount > 0){
+    h += '<div class="mood-badge" style="background:var(--green-soft);color:var(--green);">✓ 이전에 '+priorCount+'회 사경한 법문이에요</div>';
+  }
   h += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">' +
     '<span class="passage-crumb">'+bookInfo.emoji+' '+esc(bookInfo.label)+' · '+esc(crumb)+'</span>' +
     '<button class="star-btn" data-star="'+esc(ids[0])+'" title="즐겨찾기">'+(fav?'★':'☆')+'</button>' +
     '</div>';
   h += '<div class="passage-text"'+(small?' style="font-size:15px;line-height:1.85;"':'')+'>'+esc(text)+'</div>';
-  h += '<div class="passage-meta"><span>'+totalLen+'자</span>' + (readonly? '<span>✓ 완료</span>' : '') + '</div>';
+  h += '<div class="passage-meta"><span>'+totalLen+'자</span>' + (readonly? '<span>✓ '+(completedCount(ids[0])>1? completedCount(ids[0])+'회 사경':'완료')+'</span>' : '') + '</div>';
   if(!readonly){
     h += '<button class="btn btn-success" id="completeBtn" style="margin-top:16px;">✅ 사경 완료</button>';
     h += '<button class="btn btn-ghost" id="redrawBtn" style="margin-top:10px;">🔄 처음부터 다시 고르기</button>';
@@ -972,6 +1016,10 @@ function wireHome(){
       saveState();
       renderHome();
     });
+  });
+  var pickManualBtn = document.getElementById("pickManualBtn");
+  if(pickManualBtn) pickManualBtn.addEventListener("click", function(){
+    setTab("library");
   });
   var drawBtn = document.getElementById("drawBtn");
   if(drawBtn) drawBtn.addEventListener("click", function(){
@@ -1012,9 +1060,7 @@ function wireHome(){
   var completeBtn = document.getElementById("completeBtn");
   if(completeBtn) completeBtn.addEventListener("click", function(){
     var ids = state.todaysPick.ids;
-    ids.forEach(function(id){
-      if(state.usedIds.indexOf(id) === -1) state.usedIds.push(id);
-    });
+    markCompleted(ids);
     var day = todayStr();
     state.history[day] = (state.history[day]||[]).concat(ids);
     state.todaysPick.completed = true;
@@ -1038,9 +1084,7 @@ function wireHome(){
         return;
       }
       var ids = result.chosen.map(function(u){return u.id;});
-      ids.forEach(function(id){
-        if(state.usedIds.indexOf(id) === -1) state.usedIds.push(id);
-      });
+      markCompleted(ids);
       var day = todayStr();
       state.history[day] = (state.history[day]||[]).concat(ids);
       state.todaysPick = { date: day, ids: ids, completed:true, mood:null };
@@ -1178,19 +1222,26 @@ function showDaySheet(dateStr){
 }
 
 function renderLibrary(){
+  libraryView = "books";
+  renderLibraryBooks();
+}
+
+function renderLibraryBooks(){
+  libraryView = "books";
   var html = topbar(false);
   html += '<div class="view">';
   html += '<div class="sec-title">📚 나의 서고</div>';
-  html += '<div class="hint">책을 켜고 끄면 오늘의 법문 뽑기에 반영돼요. 진도율은 완료한 법문 수를 기준으로 계산됩니다.</div>';
+  html += '<input type="text" id="librarySearchInput" class="mood-input" placeholder="🔍 법문 속 단어로 검색하기" value="'+esc(librarySearchQuery)+'" style="margin-bottom:12px;">';
+  html += '<div class="hint">책을 눌러 목차를 읽거나 사경할 법문을 직접 골라보세요. 스위치를 끄면 오늘의 법문 뽑기에서 제외돼요.</div>';
   html += '<div class="card" style="padding:6px 16px;">';
   BOOK_ORDER.forEach(function(b){
     var info = BOOKS[b];
     var arr = DATA_BY_BOOK[b] || [];
     var total = arr.length;
-    var done = arr.filter(function(u){ return state.usedIds.indexOf(u.id) !== -1; }).length;
+    var done = arr.filter(function(u){ return isCompleted(u.id); }).length;
     var pct = total ? Math.round(done/total*100) : 0;
     var on = !!state.settings.books[b];
-    html += '<div class="book-row">' +
+    html += '<div class="book-row" data-open-book="'+esc(b)+'">' +
       '<div class="book-emoji">'+info.emoji+'</div>' +
       '<div class="book-info">' +
         '<div class="book-name">'+esc(info.label)+'</div>' +
@@ -1204,15 +1255,19 @@ function renderLibrary(){
 
   var totalDone = totalCompleted(), totalAll = totalUnits();
   html += '<div class="stat-row">' +
-    '<div class="stat-box"><div class="stat-num">'+totalDone+'</div><div class="stat-label">전체 완료</div></div>' +
+    '<div class="stat-box"><div class="stat-num">'+totalDone+'</div><div class="stat-label">완료한 법문</div></div>' +
     '<div class="stat-box"><div class="stat-num">'+(totalAll-totalDone)+'</div><div class="stat-label">남은 법문</div></div>' +
-    '<div class="stat-box"><div class="stat-num">'+(totalAll?Math.round(totalDone/totalAll*100):0)+'%</div><div class="stat-label">전체 진도</div></div>' +
+    '<div class="stat-box"><div class="stat-num">'+totalCompletionEvents()+'</div><div class="stat-label">총 사경 횟수</div></div>' +
     '</div>';
   html += '</div>';
   appEl.innerHTML = html;
+  wireLibraryBooks();
+}
 
+function wireLibraryBooks(){
   document.querySelectorAll(".switch").forEach(function(el){
-    el.addEventListener("click", function(){
+    el.addEventListener("click", function(e){
+      e.stopPropagation();
       var b = el.getAttribute("data-book");
       var enabledCount = BOOK_ORDER.filter(function(k){ return state.settings.books[k]; }).length;
       if(state.settings.books[b] && enabledCount<=1){
@@ -1221,19 +1276,217 @@ function renderLibrary(){
       }
       state.settings.books[b] = !state.settings.books[b];
       saveState();
-      renderLibrary();
+      renderLibraryBooks();
     });
+  });
+  document.querySelectorAll("[data-open-book]").forEach(function(el){
+    el.addEventListener("click", function(){
+      libraryCurrentBook = el.getAttribute("data-open-book");
+      renderLibraryBook(libraryCurrentBook);
+    });
+  });
+  wireLibrarySearchInput("librarySearchInput");
+}
+
+function wireLibrarySearchInput(inputId){
+  var si = document.getElementById(inputId);
+  if(!si) return;
+  function go(){
+    var q = si.value.trim();
+    librarySearchQuery = q;
+    if(q) renderLibrarySearch();
+    else renderLibraryBooks();
+  }
+  si.addEventListener("keydown", function(e){ if(e.key==="Enter") go(); });
+  si.addEventListener("input", function(){
+    clearTimeout(si._t);
+    si._t = setTimeout(go, 350);
   });
 }
 
-/* ---------- 모음 (즐겨찾기 / 완료한 법문) ---------- */
-function listRowHtml(u){
-  var bookInfo = BOOKS[u.book] || {emoji:"📖", label:u.book};
+function stripSplitSuffix(crumb){
+  return (crumb||"").replace(/\s*\(\d+\/\d+\)\s*$/, "");
+}
+function bookRowHtml(u){
   var fav = !!state.favorites[u.id];
+  var badge = doneBadgeHtml(u.id);
   return '<div class="list-row" data-open="'+esc(u.id)+'">' +
     '<div class="list-row-main">' +
-      '<div class="list-row-crumb">'+bookInfo.emoji+' '+esc(bookInfo.label)+' · '+esc(u.crumb)+'</div>' +
+      (badge ? '<div style="margin-bottom:3px;">'+badge+'</div>' : '') +
       '<div class="list-row-snippet">'+esc(u.text.slice(0,70))+(u.text.length>70?"…":"")+'</div>' +
+    '</div>' +
+    '<button class="star-btn" data-star="'+esc(u.id)+'">'+(fav?'★':'☆')+'</button>' +
+    '</div>';
+}
+
+/* ---------- 책 목차를 편>장>절 트리로 만들어 목차처럼 탐색 ---------- */
+var LIBRARY_TREES = {};
+var libraryPath = [];
+
+function buildLibraryTree(bookKey){
+  if(LIBRARY_TREES[bookKey]) return LIBRARY_TREES[bookKey];
+  var root = { children: {}, childOrder: [], items: [] };
+  (DATA_BY_BOOK[bookKey]||[]).forEach(function(u){
+    var parts = stripSplitSuffix(u.crumb).split(" > ").filter(Boolean);
+    var node = root;
+    for(var i=0;i<parts.length;i++){
+      var seg = parts[i];
+      if(!node.children[seg]){
+        node.children[seg] = { children: {}, childOrder: [], items: [] };
+        node.childOrder.push(seg);
+      }
+      node = node.children[seg];
+    }
+    node.items.push(u);
+  });
+  LIBRARY_TREES[bookKey] = root;
+  return root;
+}
+function getTreeNode(bookKey, path){
+  var node = buildLibraryTree(bookKey);
+  for(var i=0;i<path.length;i++){
+    if(!node.children[path[i]]) return node;
+    node = node.children[path[i]];
+  }
+  return node;
+}
+function countNodeItems(node){
+  var n = node.items.length;
+  node.childOrder.forEach(function(seg){ n += countNodeItems(node.children[seg]); });
+  return n;
+}
+function countNodeDone(node){
+  var n = node.items.filter(function(u){ return isCompleted(u.id); }).length;
+  node.childOrder.forEach(function(seg){ n += countNodeDone(node.children[seg]); });
+  return n;
+}
+
+function renderLibraryBook(bookKey){
+  libraryView = "book";
+  libraryCurrentBook = bookKey;
+  libraryPath = [];
+  renderLibraryTreeView();
+}
+
+function renderLibraryTreeView(){
+  var bookKey = libraryCurrentBook;
+  var info = BOOKS[bookKey] || {emoji:"📖", label:bookKey};
+  var node = getTreeNode(bookKey, libraryPath);
+
+  var html = topbar(false);
+  html += '<div class="view">';
+  html += '<button class="btn-back" id="libBack">‹ '+(libraryPath.length ? esc(libraryPath.length>1?libraryPath[libraryPath.length-2]:info.label) : '서고')+'</button>';
+
+  var curLabel = libraryPath.length ? libraryPath[libraryPath.length-1] : info.label;
+  if(libraryPath.length){
+    html += '<div class="hint" style="margin-bottom:2px;">'+esc([info.label].concat(libraryPath.slice(0,-1)).join(' › '))+'</div>';
+  }
+  html += '<div class="sec-title">'+(libraryPath.length?'':info.emoji+' ')+esc(curLabel)+'</div>';
+
+  var totalHere = countNodeItems(node), doneHere = countNodeDone(node);
+  html += '<div class="hint">'+totalHere+'편 중 '+doneHere+'편 완료. '+(node.childOrder.length? '목차를 눌러 더 들어가거나, ':'')+'법문을 눌러 읽거나 사경해보세요.</div>';
+
+  html += '<div class="card" style="padding:4px 16px;">';
+  node.childOrder.forEach(function(seg){
+    var child = node.children[seg];
+    var n = countNodeItems(child), d = countNodeDone(child);
+    html += '<div class="tree-row" data-drill="'+esc(seg)+'">' +
+      '<span class="tree-row-label">'+esc(seg)+'</span>' +
+      '<span class="chapter-count">'+d+'/'+n+'</span>' +
+      '<span class="tree-row-arrow">›</span>' +
+      '</div>';
+  });
+  node.items.forEach(function(u){ html += bookRowHtml(u); });
+  if(node.childOrder.length===0 && node.items.length===0){
+    html += '<div class="empty-state">목차가 비어 있어요.</div>';
+  }
+  html += '</div>';
+  html += '</div>';
+  appEl.innerHTML = html;
+
+  document.getElementById("libBack").addEventListener("click", function(){
+    if(libraryPath.length===0){ renderLibraryBooks(); }
+    else { libraryPath.pop(); renderLibraryTreeView(); }
+  });
+  document.querySelectorAll("[data-drill]").forEach(function(el){
+    el.addEventListener("click", function(){
+      libraryPath.push(el.getAttribute("data-drill"));
+      renderLibraryTreeView();
+    });
+  });
+  wireStarButtons(function(){ renderLibraryTreeView(); });
+  document.querySelectorAll("[data-open]").forEach(function(el){
+    el.addEventListener("click", function(){ openPassageSheet(el.getAttribute("data-open")); });
+  });
+}
+
+function renderLibrarySearch(){
+  libraryView = "search";
+  var q = librarySearchQuery;
+  var html = topbar(false);
+  html += '<div class="view">';
+  html += '<button class="btn-back" id="backToBooks3">‹ 서고</button>';
+  html += '<input type="text" id="librarySearchInput2" class="mood-input" placeholder="🔍 법문 속 단어로 검색하기" value="'+esc(q)+'" style="margin-bottom:12px;">';
+  var results = [];
+  if(q){
+    var qlow = q.toLowerCase();
+    for(var i=0;i<DATA.length;i++){
+      var u = DATA[i];
+      if(u.text.toLowerCase().indexOf(qlow)!==-1 || u.crumb.toLowerCase().indexOf(qlow)!==-1){
+        results.push(u);
+        if(results.length>=150) break;
+      }
+    }
+  }
+  html += '<div class="hint">'+(q? ('"'+esc(q)+'" 검색 결과 '+results.length+'건'+(results.length>=150?' (최대 150건까지 표시)':'')) : '검색어를 입력해보세요.')+'</div>';
+  html += '<div class="card" style="padding:4px 16px;">';
+  if(q && results.length===0){
+    html += '<div class="empty-state">'+friendImg("curious",60,"empty-icon")+'검색 결과가 없어요.</div>';
+  } else {
+    results.forEach(function(u){ html += listRowHtml(u, q); });
+  }
+  html += '</div></div>';
+  appEl.innerHTML = html;
+  document.getElementById("backToBooks3").addEventListener("click", renderLibraryBooks);
+  wireStarButtons(function(){ renderLibrarySearch(); });
+  document.querySelectorAll("[data-open]").forEach(function(el){
+    el.addEventListener("click", function(){ openPassageSheet(el.getAttribute("data-open")); });
+  });
+  wireLibrarySearchInput("librarySearchInput2");
+  var si2 = document.getElementById("librarySearchInput2");
+  if(si2){ si2.focus(); si2.setSelectionRange(si2.value.length, si2.value.length); }
+}
+
+/* ---------- 모음 (즐겨찾기 / 완료한 법문) ---------- */
+function doneBadgeHtml(id){
+  var c = completedCount(id);
+  if(c<=0) return '';
+  return '<span class="done-badge">✓ '+(c>1? c+'회 사경' : '사경 완료')+'</span>';
+}
+
+function listRowHtml(u, highlightQuery){
+  var bookInfo = BOOKS[u.book] || {emoji:"📖", label:u.book};
+  var fav = !!state.favorites[u.id];
+  var snippet;
+  if(highlightQuery){
+    var idx = u.text.toLowerCase().indexOf(highlightQuery.toLowerCase());
+    if(idx!==-1){
+      var start = Math.max(0, idx-20);
+      var pre = (start>0?'…':'') + esc(u.text.slice(start, idx));
+      var mid = '<mark>'+esc(u.text.slice(idx, idx+highlightQuery.length))+'</mark>';
+      var restStart = idx+highlightQuery.length;
+      var post = esc(u.text.slice(restStart, restStart+40)) + (u.text.length>restStart+40?'…':'');
+      snippet = pre+mid+post;
+    } else {
+      snippet = esc(u.text.slice(0,70))+(u.text.length>70?"…":"");
+    }
+  } else {
+    snippet = esc(u.text.slice(0,70))+(u.text.length>70?"…":"");
+  }
+  return '<div class="list-row" data-open="'+esc(u.id)+'">' +
+    '<div class="list-row-main">' +
+      '<div class="list-row-crumb">'+bookInfo.emoji+' '+esc(bookInfo.label)+' · '+esc(u.crumb)+doneBadgeHtml(u.id)+'</div>' +
+      '<div class="list-row-snippet">'+snippet+'</div>' +
     '</div>' +
     '<button class="star-btn" data-star="'+esc(u.id)+'">'+(fav?'★':'☆')+'</button>' +
     '</div>';
@@ -1251,9 +1504,10 @@ function favoritesListHtml(){
 }
 
 function completedListHtml(){
-  if(state.usedIds.length===0) return '<div class="empty-state">'+friendImg("hurry",60,"empty-icon")+'아직 완료한 법문이 없어요.<br>오늘의 법문을 뽑아 사경을 시작해보세요.</div>';
+  var doneIds = Object.keys(state.completions);
+  if(doneIds.length===0) return '<div class="empty-state">'+friendImg("hurry",60,"empty-icon")+'아직 완료한 법문이 없어요.<br>오늘의 법문을 뽑아 사경을 시작해보세요.</div>';
   var idDateMap = buildIdDateMap();
-  var sortedIds = state.usedIds.slice().sort(function(a,b){
+  var sortedIds = doneIds.slice().sort(function(a,b){
     var da = idDateMap[a]||"", db = idDateMap[b]||"";
     if(da<db) return 1; if(da>db) return -1; return 0;
   });
@@ -1300,6 +1554,15 @@ function wireCollection(){
   });
 }
 
+function refreshCurrentListView(){
+  if(currentTab==="collection") renderCollection();
+  else if(currentTab==="library"){
+    if(libraryView==="book") renderLibraryTreeView();
+    else if(libraryView==="search") renderLibrarySearch();
+    else renderLibraryBooks();
+  }
+}
+
 function openPassageSheet(id){
   var u = DATA_BY_ID[id];
   if(!u) return;
@@ -1308,27 +1571,38 @@ function openPassageSheet(id){
   overlay.className = "overlay";
   function paint(){
     var fav = !!state.favorites[u.id];
+    var cnt = completedCount(u.id);
     overlay.innerHTML = '<div class="sheet">' +
       '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">' +
         '<span class="passage-crumb">'+bookInfo.emoji+' '+esc(bookInfo.label)+' · '+esc(u.crumb)+'</span>' +
         '<button class="star-btn" id="sheetStar">'+(fav?'★':'☆')+'</button>' +
       '</div>' +
+      (cnt>0 ? '<div class="mood-badge">✓ '+(cnt>1? cnt+'회 사경함' : '사경 완료')+'</div>' : '') +
       '<div class="passage-text" style="margin-top:12px;font-size:15.5px;">'+esc(u.text)+'</div>' +
-      '<button class="btn btn-ghost" id="closeSheet2" style="margin-top:16px;">닫기</button>' +
+      '<button class="btn btn-primary" id="pickThisBtn" style="margin-top:16px;">🪷 '+(cnt>0?'이 법문으로 다시 사경하기':'이 법문으로 사경하기')+'</button>' +
+      '<button class="btn btn-ghost" id="closeSheet2" style="margin-top:10px;">닫기</button>' +
       '</div>';
     overlay.querySelector("#sheetStar").addEventListener("click", function(){
       toggleFav([u.id]);
       paint();
     });
+    overlay.querySelector("#pickThisBtn").addEventListener("click", function(){
+      state.todaysPick = { date: todayStr(), ids: [u.id], completed:false, mood:null };
+      saveState();
+      justDrewAnimation = true;
+      overlay.remove();
+      setTab("home");
+      toast("오늘 탭에서 사경을 시작해보세요 ✍️");
+    });
     overlay.querySelector("#closeSheet2").addEventListener("click", function(){
       overlay.remove();
-      if(currentTab==="collection") renderCollection();
+      refreshCurrentListView();
     });
   }
   paint();
   document.body.appendChild(overlay);
   overlay.addEventListener("click", function(e){
-    if(e.target===overlay){ overlay.remove(); if(currentTab==="collection") renderCollection(); }
+    if(e.target===overlay){ overlay.remove(); refreshCurrentListView(); }
   });
 }
 
@@ -1355,17 +1629,9 @@ function renderSettings(){
 
   html += '<div class="sec-title">데이터</div>';
   html += '<div class="card">' +
-    '<div class="book-count" style="margin-bottom:10px;">총 '+totalUnits()+'편의 법문이 준비되어 있어요 · 모든 기록은 이 기기·이 주소(도메인)에만 저장됩니다.</div>' +
+    '<div class="book-count" style="margin-bottom:10px;">총 '+totalUnits()+'편의 법문이 준비되어 있어요 · 로그인하면 계정에, 게스트는 이 기기에 저장됩니다.</div>' +
     (storageOK ? '' : '<div class="hint" style="color:var(--red);">⚠️ 이 브라우저에서는 저장이 되지 않을 수 있어요. 시크릿 모드가 아닌지 확인해주세요.</div>') +
     '<button class="btn btn-danger btn-sm" id="resetBtn">전체 기록 초기화</button>' +
-    '</div>';
-
-  html += '<div class="sec-title">기록 백업 · 다른 기기로 옮기기</div>';
-  html += '<div class="hint">사경 기록은 지금 열고 있는 주소(링크)와 이 기기에만 저장돼요. 링크를 바꾸거나(예: claude.ai → Netlify) 다른 기기·다른 브라우저에서 이어서 쓰려면, 여기서 기록을 파일로 내보낸 뒤 새 주소에서 불러오면 그대로 이어집니다.</div>';
-  html += '<div class="card">' +
-    '<button class="btn btn-ghost btn-sm" id="exportBtn" style="width:100%;">⬇️ 기록 내보내기 (파일로 저장)</button>' +
-    '<button class="btn btn-ghost btn-sm" id="importBtn" style="width:100%;margin-top:10px;">⬆️ 기록 불러오기 (백업 파일에서)</button>' +
-    '<input type="file" id="importFile" accept="application/json,.json" style="display:none;">' +
     '</div>';
 
   html += '<div class="sec-title">사경노트에 대하여</div>';
@@ -1420,75 +1686,6 @@ function renderSettings(){
       toast("초기화되었습니다.");
       renderSettings();
     });
-  });
-
-  document.getElementById("exportBtn").addEventListener("click", function(){
-    try{
-      var payload = JSON.stringify({ app:"sagyeong-note", exportedAt: new Date().toISOString(), state: state }, null, 2);
-      var blob = new Blob([payload], {type:"application/json"});
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement("a");
-      var d = new Date();
-      var fname = "사경노트-백업-" + todayStr(d) + ".json";
-      a.href = url; a.download = fname;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
-      toast("백업 파일을 저장했어요.");
-    }catch(e){
-      toast("내보내기에 실패했어요. 브라우저 설정을 확인해주세요.");
-    }
-  });
-
-  var importBtn = document.getElementById("importBtn");
-  var importFile = document.getElementById("importFile");
-  importBtn.addEventListener("click", function(){ importFile.click(); });
-  importFile.addEventListener("change", function(){
-    var file = importFile.files && importFile.files[0];
-    if(!file) return;
-    var reader = new FileReader();
-    reader.onload = function(){
-      try{
-        var parsed = JSON.parse(reader.result);
-        var incoming = parsed && parsed.state ? parsed.state : parsed;
-        if(!incoming || !incoming.settings || !Array.isArray(incoming.usedIds)){
-          toast("올바른 백업 파일이 아니에요.");
-          return;
-        }
-        var overlay = document.createElement("div");
-        overlay.className = "overlay";
-        overlay.innerHTML = '<div class="sheet">' +
-          '<div class="sheet-title">기록을 불러올까요?</div>' +
-          '<div class="hint">지금 이 기기·주소에 있는 기록은 불러온 백업 내용으로 덮어써져요. 이 작업은 되돌릴 수 없습니다.</div>' +
-          '<button class="btn btn-primary" id="confirmImport" style="margin-top:6px;">네, 불러옵니다</button>' +
-          '<button class="btn btn-ghost" id="cancelImport" style="margin-top:10px;">취소</button>' +
-          '</div>';
-        document.body.appendChild(overlay);
-        overlay.addEventListener("click", function(e){ if(e.target===overlay) overlay.remove(); });
-        overlay.querySelector("#cancelImport").addEventListener("click", function(){ overlay.remove(); });
-        overlay.querySelector("#confirmImport").addEventListener("click", function(){
-          var d = defaultState();
-          incoming.usedIds = incoming.usedIds || [];
-          incoming.favorites = incoming.favorites || {};
-          incoming.history = incoming.history || {};
-          incoming.settings = incoming.settings || {};
-          incoming.settings.books = Object.assign({}, d.settings.books, incoming.settings.books || {});
-          incoming.settings.difficulty = incoming.settings.difficulty || "medium";
-          incoming.todaysPick = incoming.todaysPick || null;
-          state = incoming;
-          saveState();
-          overlay.remove();
-          toast("기록을 불러왔어요.");
-          renderSettings();
-        });
-      }catch(e){
-        toast("파일을 읽지 못했어요. 백업 파일이 맞는지 확인해주세요.");
-      } finally {
-        importFile.value = "";
-      }
-    };
-    reader.readAsText(file);
   });
 }
 
